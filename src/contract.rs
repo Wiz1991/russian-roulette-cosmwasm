@@ -1,9 +1,11 @@
-use crate::msg::{CreatorResponse, HandleMsg, InitMsg, PotResponse, QueryMsg};
+use std::cmp::Ordering;
+
+use crate::msg::{CreatorResponse, HandleMsg, InitMsg, PotResponse, QueryMsg, SpinResponse};
 use crate::rand::{new_entropy, sha_256};
 use crate::state::{config, config_read, State};
 use cosmwasm_std::{
     debug_print, to_binary, Api, Binary, Coin, Env, Extern, HandleResponse, InitResponse, Querier,
-    StdResult, Storage,
+    StdError, StdResult, Storage, Uint128,
 };
 use rand_chacha::ChaChaRng;
 use rand_core::{RngCore, SeedableRng};
@@ -59,6 +61,24 @@ pub fn handle_spin<S: Storage, A: Api, Q: Querier>(
 ) -> StdResult<HandleResponse> {
     let state = config(&mut deps.storage).load()?;
 
+    let mut total_coins_sent = Uint128::zero();
+    for coin in env.message.sent_funds.iter() {
+        if coin.denom != "uscrt" {
+            return Err(StdError::generic_err(
+                "Only uscrt is supported. Invalid token sent. ",
+            ));
+        }
+        total_coins_sent += coin.amount;
+    }
+    if total_coins_sent.is_zero() {
+        return Err(StdError::generic_err("No coins sent"));
+    }
+
+    let predicted_winnings = total_coins_sent.u128() * 2;
+    if predicted_winnings > state.pot.into() {
+        return Err(StdError::generic_err("Not enough funds in pot"));
+    }
+
     let entropies = vec![
         env.block.height.to_be_bytes().clone(),
         env.block.time.to_be_bytes().clone(),
@@ -67,11 +87,23 @@ pub fn handle_spin<S: Storage, A: Api, Q: Querier>(
     let rand_seed = new_entropy(&entropies, &state.prng_seed);
     let mut rng = ChaChaRng::from_seed(rand_seed);
 
-    let rand_num = rng.next_u32() % 6;
+    let rand_num = (rng.next_u32() % 6) as u8;
+
+    let result = match state.current_round.cmp(&rand_num) {
+        Ordering::Equal => "win",
+        _ => "lose",
+    };
 
     println!("rand_num: {}", rand_num);
 
-    Ok(HandleResponse::default())
+    Ok(HandleResponse {
+        messages: vec![],
+        log: vec![],
+        data: Some(to_binary(&SpinResponse {
+            result: "".to_string(),
+            winnings: None,
+        })?),
+    })
 }
 pub fn handle_cash_out<S: Storage, A: Api, Q: Querier>(
     _deps: &mut Extern<S, A, Q>,
@@ -99,7 +131,7 @@ pub fn query_creator<S: Storage, A: Api, Q: Querier>(
 mod tests {
     use super::*;
     use cosmwasm_std::testing::{mock_dependencies, mock_env};
-    use cosmwasm_std::{coins, from_binary, BlockInfo, StdError};
+    use cosmwasm_std::{coins, BlockInfo};
 
     #[test]
     fn proper_initialization() {
