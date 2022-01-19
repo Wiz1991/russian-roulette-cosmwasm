@@ -39,8 +39,6 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
 
     config(&mut deps.storage).save(&state)?;
 
-    debug_print!("Contract was initialized by {}", env.message.sender);
-
     Ok(InitResponse::default())
 }
 
@@ -137,7 +135,7 @@ pub fn handle_spin<S: Storage, A: Api, Q: Querier>(
     config(&mut deps.storage).save(&state)?;
 
     Ok(HandleResponse {
-        messages: message.map_or_else(|| vec![], |s: BankMsg| vec![CosmosMsg::Bank(s)]),
+        messages: message.map_or_else(Vec::new, |msg| vec![CosmosMsg::Bank(msg)]),
         log: vec![
             log("predicted_win", predicted_winnings.to_string()),
             log("generated_value", rand_num.to_string()),
@@ -148,11 +146,30 @@ pub fn handle_spin<S: Storage, A: Api, Q: Querier>(
     })
 }
 pub fn handle_cash_out<S: Storage, A: Api, Q: Querier>(
-    _deps: &mut Extern<S, A, Q>,
-    _env: Env,
-    _quantity: Option<Vec<Coin>>,
+    deps: &mut Extern<S, A, Q>,
+    env: Env,
+    quantity: Option<Uint128>,
 ) -> StdResult<HandleResponse> {
-    Ok(HandleResponse::default())
+    let mut state = config(&mut deps.storage).load()?;
+    state.pot = (state.pot - quantity.unwrap_or_else(|| state.pot))
+        .expect("Error! Can't withdraw more than the pot has");
+
+    let send_msg = BankMsg::Send {
+        from_address: env.contract.address,
+        to_address: env.message.sender,
+        amount: vec![Coin {
+            denom: "uscrt".to_string(),
+            amount: quantity.unwrap_or_else(|| state.pot),
+        }],
+    };
+
+    config(&mut deps.storage).save(&state)?;
+
+    Ok(HandleResponse {
+        messages: vec![CosmosMsg::Bank(send_msg)],
+        log: vec![log("pot", state.pot.to_string())],
+        data: None,
+    })
 }
 
 pub fn query_pot<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>) -> StdResult<PotResponse> {
