@@ -4,8 +4,8 @@ use crate::msg::{CreatorResponse, HandleMsg, InitMsg, PotResponse, QueryMsg, Spi
 use crate::rand::{new_entropy, sha_256};
 use crate::state::{config, config_read, State};
 use cosmwasm_std::{
-    debug_print, to_binary, Api, Binary, Coin, Env, Extern, HandleResponse, InitResponse, Querier,
-    StdError, StdResult, Storage, Uint128,
+    debug_print, log, to_binary, Api, BankMsg, Binary, Coin, CosmosMsg, Env, Extern,
+    HandleResponse, InitResponse, Querier, StdError, StdResult, Storage, Uint128,
 };
 use rand_chacha::ChaChaRng;
 use rand_core::{RngCore, SeedableRng};
@@ -15,13 +15,23 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     env: Env,
     msg: InitMsg,
 ) -> StdResult<InitResponse> {
-    let owner = msg.creator.unwrap_or(env.message.sender.clone());
+    let owner = msg.creator.unwrap_or_else(|| env.message.sender.clone());
     let owner = deps.api.canonical_address(&owner)?;
 
     let prng_seed: Vec<u8> = sha_256(base64::encode(&msg.entropy).as_bytes()).to_vec();
 
+    let mut total_coins_sent = Uint128::zero();
+    for coin in env.message.sent_funds.iter() {
+        if coin.denom != "uscrt" {
+            return Err(StdError::generic_err(
+                "Only uscrt is supported. Invalid token sent. ",
+            ));
+        }
+        total_coins_sent += coin.amount;
+    }
+
     let state = State {
-        pot: 0,
+        pot: total_coins_sent,
         owner,
         prng_seed,
         current_round: 0,
@@ -59,7 +69,7 @@ pub fn handle_spin<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
 ) -> StdResult<HandleResponse> {
-    let state = config(&mut deps.storage).load()?;
+    let mut state = config(&mut deps.storage).load()?;
 
     let mut total_coins_sent = Uint128::zero();
     for coin in env.message.sent_funds.iter() {
@@ -79,30 +89,62 @@ pub fn handle_spin<S: Storage, A: Api, Q: Querier>(
         return Err(StdError::generic_err("Not enough funds in pot"));
     }
 
-    let entropies = vec![
-        env.block.height.to_be_bytes().clone(),
-        env.block.time.to_be_bytes().clone(),
-        state.pot.to_be_bytes().clone(),
-    ];
+    //list of entropies to be used for the spin RNG
+    let entropies = vec![env.block.height.to_be_bytes(), env.block.time.to_be_bytes()];
+    //construct a new entropy that combines multiple inputs including preset one from the creator
     let rand_seed = new_entropy(&entropies, &state.prng_seed);
     let mut rng = ChaChaRng::from_seed(rand_seed);
-
     let rand_num = (rng.next_u32() % 6) as u8;
 
-    let result = match state.current_round.cmp(&rand_num) {
-        Ordering::Equal => "win",
-        _ => "lose",
-    };
+    let (result, message): (SpinResponse, Option<BankMsg>) =
+        match state.current_round.cmp(&rand_num) {
+            //the player has lost if the spinned number is the same as his round number
+            Ordering::Equal => {
+                state.pot += total_coins_sent;
+                state.current_round = 0;
 
-    println!("rand_num: {}", rand_num);
+                let spin_res = SpinResponse {
+                    result: String::from("You just died. You lost all your money."),
+                    winnings: None,
+                };
+
+                (spin_res, None)
+            }
+            _ => {
+                //this error cannot happen because of the inital check with predicted_winnings, but it is here for completeness
+                state.pot =
+                    (state.pot - total_coins_sent).expect("Critical Error: Pot is negative");
+                //since the spin happens every round, there is a possibility that no player will lose, thus we reset after 6 rounds.
+                state.current_round = (state.current_round + 1) % 6;
+
+                let spin_res = SpinResponse {
+                    result: String::from("Congrats! You just won some money."),
+                    winnings: Some(Uint128::from(predicted_winnings)),
+                };
+
+                let send_msg = BankMsg::Send {
+                    from_address: env.contract.address,
+                    to_address: env.message.sender,
+                    amount: vec![Coin {
+                        denom: "uscrt".to_string(),
+                        amount: Uint128::from(predicted_winnings),
+                    }],
+                };
+
+                (spin_res, Some(send_msg))
+            }
+        };
+    config(&mut deps.storage).save(&state)?;
 
     Ok(HandleResponse {
-        messages: vec![],
-        log: vec![],
-        data: Some(to_binary(&SpinResponse {
-            result: "".to_string(),
-            winnings: None,
-        })?),
+        messages: message.map_or_else(|| vec![], |s: BankMsg| vec![CosmosMsg::Bank(s)]),
+        log: vec![
+            log("predicted_win", predicted_winnings.to_string()),
+            log("generated_value", rand_num.to_string()),
+            log("pot", state.pot.to_string()),
+            log("current_round", state.current_round.to_string()),
+        ],
+        data: Some(to_binary(&result)?),
     })
 }
 pub fn handle_cash_out<S: Storage, A: Api, Q: Querier>(
@@ -130,8 +172,8 @@ pub fn query_creator<S: Storage, A: Api, Q: Querier>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cosmwasm_std::coins;
     use cosmwasm_std::testing::{mock_dependencies, mock_env};
-    use cosmwasm_std::{coins, BlockInfo};
 
     #[test]
     fn proper_initialization() {
@@ -143,7 +185,7 @@ mod tests {
             end_time: None,
             entropy: "awdada".to_string(),
         };
-        let env = mock_env("creator", &coins(1000, "earth"));
+        let env = mock_env("creator", &coins(1000, "uscrt"));
 
         // we can just call .unwrap() to assert this was a success
         let res = init(&mut deps, env, msg).unwrap();
@@ -160,19 +202,14 @@ mod tests {
             end_time: None,
             entropy: "awdadae".to_string(),
         };
-        let mut env = mock_env("creator", &coins(1000, "earth"));
+        let env = mock_env("creator", &coins(1000, "uscrt"));
+        let env_player = mock_env("player", &coins(2, "uscrt"));
 
         // we can just call .unwrap() to assert this was a success
         let _res = init(&mut deps, env.clone(), msg).unwrap();
 
         let msg = HandleMsg::Spin {};
 
-        let _res = handle(&mut deps, env.clone(), msg.clone()).unwrap();
-        env.block = BlockInfo {
-            chain_id: "test-chain-id".to_string(),
-            height: 1,
-            time: 1,
-        };
-        let _res = handle(&mut deps, env.clone(), msg.clone()).unwrap();
+        let _res = handle(&mut deps, env_player, msg.clone()).unwrap();
     }
 }

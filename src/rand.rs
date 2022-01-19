@@ -11,7 +11,7 @@ pub fn sha_256(data: &[u8]) -> [u8; 32] {
     result
 }
 
-pub fn new_entropy(input: &Vec<[u8; 8]>, seed: &[u8]) -> [u8; 32] {
+pub fn new_entropy(input: &[[u8; 8]], seed: &[u8]) -> [u8; 32] {
     let mut rng_entropy = vec![];
     for entropy in input {
         rng_entropy.extend_from_slice(entropy);
