@@ -153,6 +153,8 @@ pub fn handle_spin<S: Storage, A: Api, Q: Querier>(
             log("generated_value", rand_num.to_string()),
             log("pot", state.pot.to_string()),
             log("current_round", state.current_round.to_string()),
+            log("current_time", env.block.time.to_string()),
+            log("block_height", env.block.height.to_string()),
         ],
         data: Some(to_binary(&result)?),
     })
