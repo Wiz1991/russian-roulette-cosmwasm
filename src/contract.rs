@@ -109,7 +109,7 @@ pub fn handle_spin<S: Storage, A: Api, Q: Querier>(
     let (result, message): (SpinResponse, Option<BankMsg>) =
         match state.current_round.cmp(&rand_num) {
             //the player has lost if the spinned number is the same as his round number
-            Ordering::Equal => {
+            Ordering::Equal {} => {
                 state.pot += total_coins_sent;
                 state.current_round = 0;
 
@@ -121,6 +121,8 @@ pub fn handle_spin<S: Storage, A: Api, Q: Querier>(
                 (spin_res, None)
             }
             _ => {
+                println!("comparng {} and {}", state.current_round, rand_num);
+
                 //this error cannot happen because of the inital check with predicted_winnings, but it is here for completeness
                 state.pot =
                     (state.pot - total_coins_sent).expect("Critical Error: Pot is negative");
@@ -220,9 +222,12 @@ pub fn query_expiration<S: Storage, A: Api, Q: Querier>(
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use super::*;
-    use cosmwasm_std::coins;
     use cosmwasm_std::testing::{mock_dependencies, mock_env};
+    use cosmwasm_std::{coins, BlockInfo};
+    use std::time::UNIX_EPOCH;
 
     #[test]
     fn proper_initialization() {
@@ -250,7 +255,16 @@ mod tests {
             entropy: "awdadae".to_string(),
         };
         let env = mock_env("creator", &coins(1000, "uscrt"));
-        let env_player = mock_env("player", &coins(2, "uscrt"));
+        let mut env_player = mock_env("player", &coins(2, "uscrt"));
+
+        env_player.block = BlockInfo {
+            height: 1332,
+            time: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            chain_id: "awdadae".to_string(),
+        };
 
         // we can just call .unwrap() to assert this was a success
         let _res = init(&mut deps, env.clone(), msg).unwrap();
