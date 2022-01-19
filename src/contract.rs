@@ -1,11 +1,15 @@
 use std::cmp::Ordering;
 
-use crate::msg::{CreatorResponse, HandleMsg, InitMsg, PotResponse, QueryMsg, SpinResponse};
+use crate::expiration::Expiration;
+use crate::msg::{
+    CreatorResponse, ExpirationResponse, HandleMsg, InitMsg, PotResponse, QueryMsg, RoundResponse,
+    SpinResponse,
+};
 use crate::rand::{new_entropy, sha_256};
 use crate::state::{config, config_read, State};
 use cosmwasm_std::{
-    debug_print, log, to_binary, Api, BankMsg, Binary, Coin, CosmosMsg, Env, Extern,
-    HandleResponse, InitResponse, Querier, StdError, StdResult, Storage, Uint128,
+    log, to_binary, Api, BankMsg, Binary, Coin, CosmosMsg, Env, Extern, HandleResponse,
+    InitResponse, Querier, StdError, StdResult, Storage, Uint128,
 };
 use rand_chacha::ChaChaRng;
 use rand_core::{RngCore, SeedableRng};
@@ -15,10 +19,11 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     env: Env,
     msg: InitMsg,
 ) -> StdResult<InitResponse> {
-    let owner = msg.creator.unwrap_or_else(|| env.message.sender.clone());
+    let owner = msg.creator.unwrap_or(env.message.sender);
     let owner = deps.api.canonical_address(&owner)?;
 
     let prng_seed: Vec<u8> = sha_256(base64::encode(&msg.entropy).as_bytes()).to_vec();
+    let expiration = msg.expiration.unwrap_or(Expiration::default());
 
     let mut total_coins_sent = Uint128::zero();
     for coin in env.message.sent_funds.iter() {
@@ -33,6 +38,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     let state = State {
         pot: total_coins_sent,
         owner,
+        expiration,
         prng_seed,
         current_round: 0,
     };
@@ -60,6 +66,8 @@ pub fn query<S: Storage, A: Api, Q: Querier>(
     match msg {
         QueryMsg::Pot {} => to_binary(&query_pot(deps)),
         QueryMsg::Creator {} => to_binary(&query_creator(deps)),
+        QueryMsg::Round {} => to_binary(&query_round(deps)),
+        QueryMsg::Expiration {} => to_binary(&query_expiration(deps)),
     }
 }
 
@@ -68,6 +76,10 @@ pub fn handle_spin<S: Storage, A: Api, Q: Querier>(
     env: Env,
 ) -> StdResult<HandleResponse> {
     let mut state = config(&mut deps.storage).load()?;
+
+    if state.expiration.is_expired(&env.block) {
+        return Err(StdError::generic_err("Expired. This game has been closed."));
+    }
 
     let mut total_coins_sent = Uint128::zero();
     for coin in env.message.sent_funds.iter() {
@@ -151,7 +163,8 @@ pub fn handle_cash_out<S: Storage, A: Api, Q: Querier>(
     quantity: Option<Uint128>,
 ) -> StdResult<HandleResponse> {
     let mut state = config(&mut deps.storage).load()?;
-    state.pot = (state.pot - quantity.unwrap_or_else(|| state.pot))
+
+    state.pot = (state.pot - quantity.unwrap_or(state.pot))
         .expect("Error! Can't withdraw more than the pot has");
 
     let send_msg = BankMsg::Send {
@@ -159,7 +172,7 @@ pub fn handle_cash_out<S: Storage, A: Api, Q: Querier>(
         to_address: env.message.sender,
         amount: vec![Coin {
             denom: "uscrt".to_string(),
-            amount: quantity.unwrap_or_else(|| state.pot),
+            amount: quantity.unwrap_or(state.pot),
         }],
     };
 
@@ -186,6 +199,23 @@ pub fn query_creator<S: Storage, A: Api, Q: Querier>(
     let creator = deps.api.human_address(&state.owner)?;
     Ok(CreatorResponse { creator })
 }
+pub fn query_round<S: Storage, A: Api, Q: Querier>(
+    deps: &Extern<S, A, Q>,
+) -> StdResult<RoundResponse> {
+    let state = config_read(&deps.storage).load()?;
+    Ok(RoundResponse {
+        round: state.current_round,
+    })
+}
+pub fn query_expiration<S: Storage, A: Api, Q: Querier>(
+    deps: &Extern<S, A, Q>,
+) -> StdResult<ExpirationResponse> {
+    let state = config_read(&deps.storage).load()?;
+    Ok(ExpirationResponse {
+        expiration: state.expiration,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,8 +228,7 @@ mod tests {
 
         let msg = InitMsg {
             creator: None,
-            end_height: None,
-            end_time: None,
+            expiration: None,
             entropy: "awdada".to_string(),
         };
         let env = mock_env("creator", &coins(1000, "uscrt"));
@@ -215,8 +244,7 @@ mod tests {
 
         let msg = InitMsg {
             creator: None,
-            end_height: None,
-            end_time: None,
+            expiration: None,
             entropy: "awdadae".to_string(),
         };
         let env = mock_env("creator", &coins(1000, "uscrt"));

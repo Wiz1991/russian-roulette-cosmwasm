@@ -1,4 +1,5 @@
 pub mod contract;
+pub mod expiration;
 pub mod msg;
 mod rand;
 pub mod state;

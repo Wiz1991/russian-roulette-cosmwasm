@@ -3,12 +3,14 @@ use std::fs::create_dir_all;
 
 use cosmwasm_schema::{export_schema, remove_schemas, schema_for};
 
-use roulette::msg::{CreatorResponse, HandleMsg, InitMsg, PotResponse, QueryMsg};
+use roulette::msg::{
+    CreatorResponse, ExpirationResponse, HandleMsg, InitMsg, PotResponse, QueryMsg, RoundResponse,
+};
 use roulette::state::State;
 
 fn main() {
     let mut out_dir = current_dir().unwrap();
-    out_dir.push("schema");
+    out_dir.push("api");
     create_dir_all(&out_dir).unwrap();
     remove_schemas(&out_dir).unwrap();
 
@@ -18,4 +20,6 @@ fn main() {
     export_schema(&schema_for!(State), &out_dir);
     export_schema(&schema_for!(PotResponse), &out_dir);
     export_schema(&schema_for!(CreatorResponse), &out_dir);
+    export_schema(&schema_for!(RoundResponse), &out_dir);
+    export_schema(&schema_for!(ExpirationResponse), &out_dir);
 }
